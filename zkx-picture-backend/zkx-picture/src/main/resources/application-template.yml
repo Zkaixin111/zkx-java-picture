@@ -34,6 +34,22 @@ spring:
     host: ${REDIS_HOST:127.0.0.1}
     port: ${REDIS_PORT:6379}
     timeout: 5000
+  # RabbitMQ 配置（异步 AI 打标）
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:your-rabbitmq-username}
+    password: ${RABBITMQ_PASSWORD:your-rabbitmq-password}
+    publisher-confirm-type: correlated # 消息发布确认
+    publisher-returns: true #消息路由失败回调
+    listener:
+      simple:
+        acknowledge-mode: manual # 手动确认,确保消费者如果没有消费消息能告诉队列
+        prefetch: 10 # 每个消费者最多预取10条未 ack 的消息
+        retry:
+          enabled: true # 开启消费端自动重试。
+          max-attempts: 3 # 最大重试次数
+          initial-interval: 2000 # 初始重试间隔
 # 接口文档配置
 knife4j:
   enable: true

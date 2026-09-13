@@ -55,9 +55,9 @@ src/main/java/com/zkxpicturebackend/
 
 ## 异步事件
 
-通过 **Disruptor** 实现无锁异步队列，典型场景：
-- 图片上传成功后异步写入数据库 + 打 AI 标签
-- 审核流完成后通过 **WebSocket** 推送给空间成员
+- **RabbitMQ**：图片上传后 AI 打标异步化（生产者 `AiTagProducer` → 队列 → 消费者 `AiTagConsumer` 调用通义千问 VL），手动 ack + 自动重试（3 次）
+- **Disruptor**：无锁内存队列，处理高并发事件分发
+- **WebSocket**：审核结果、空间成员变更实时推送给在线成员
 
 ## 缓存策略
 
@@ -82,6 +82,10 @@ src/main/java/com/zkxpicturebackend/
 | `DB_PASSWORD` | `your-database-password` | 数据库密码 |
 | `REDIS_HOST` | `127.0.0.1` | Redis 主机 |
 | `REDIS_PORT` | `6379` | Redis 端口 |
+| `RABBITMQ_HOST` | `127.0.0.1` | RabbitMQ 主机（异步 AI 打标） |
+| `RABBITMQ_PORT` | `5672` | RabbitMQ 端口 |
+| `RABBITMQ_USERNAME` | `your-rabbitmq-username` | RabbitMQ 用户名 |
+| `RABBITMQ_PASSWORD` | `your-rabbitmq-password` | RabbitMQ 密码 |
 | `COS_HOST` | `https://your-bucket.cos...` | COS 访问域名 |
 | `COS_SECRET_ID` | `AKIDxxxx...` | 腾讯云 API 密钥 ID |
 | `COS_SECRET_KEY` | `your-cos-secret-key-here` | 腾讯云 API 密钥 Key |

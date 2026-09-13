@@ -19,6 +19,7 @@ import com.zkxpicturebackend.manager.auth.SpaceUserAuthManager;
 import com.zkxpicturebackend.manager.auth.StpKit;
 import com.zkxpicturebackend.manager.auth.annotation.SaSpaceCheckPermission;
 import com.zkxpicturebackend.manager.auth.model.SpaceUserPermissionConstant;
+import com.zkxpicturebackend.manager.rabbitmq.AiTagProducer;
 import com.zkxpicturebackend.model.constant.UserConstant;
 import com.zkxpicturebackend.model.dto.picature.*;
 import com.zkxpicturebackend.model.entity.Picture;
@@ -62,6 +63,8 @@ public class PictureController {
     private SpaceService spaceService;
     @Resource
     private SpaceUserAuthManager spaceUserAuthManager;
+    @Resource
+    private AiTagProducer aiTagProducer;
 
 
     /**
@@ -320,7 +323,7 @@ public class PictureController {
      */
     @PostMapping("/upload/batch")
     @AuthCheck(mustRole = UserConstant.ADMIN_ROLE)
-    public BaseResponse<Integer> uploadPictureByBatch(@RequestBody PictureUploadByBatchRequest pictureUploadByBatchRequest, HttpServletRequest request) {
+    public BaseResponse<Integer> uploadPictureByBatch(@RequestBody PictureUploadByBatchRequest pictureUploadByBatchRequest, HttpServletRequest request) throws InterruptedException {
         ThrowUtils.throwIf(pictureUploadByBatchRequest == null, ErrorCode.PARAMS_ERROR);
         //得到用户
         User loginUser = userService.getLoginUser(request);
@@ -386,8 +389,7 @@ public class PictureController {
         ThrowUtils.throwIf(pictureEditRequest == null || pictureEditRequest.getId() == null, ErrorCode.PARAMS_ERROR);
         Picture picture = pictureService.getById(pictureEditRequest.getId());
         ThrowUtils.throwIf(picture == null, ErrorCode.NOT_FOUND_ERROR, "图片不存在");
-        // 直接调用 pictureService（注入的本身就是 Spring 代理，@Async 生效）
-        pictureService.generateAndSaveTags(picture.getId(), picture.getUrl());
+        aiTagProducer.sendAiTagMessage(picture.getId(), picture.getUrl());
         return ResultUtils.success(true);
     }
 

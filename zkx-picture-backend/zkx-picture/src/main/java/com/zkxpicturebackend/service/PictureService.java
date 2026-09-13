@@ -114,7 +114,7 @@ public interface PictureService extends IService<Picture> {
     Integer uploadPictureByBatch(
             PictureUploadByBatchRequest pictureUploadByBatchRequest,
             User loginUser
-    );
+    ) throws InterruptedException;
 
     @Async
     void clearPictureFile(Picture oldPicture);
@@ -140,13 +140,6 @@ public interface PictureService extends IService<Picture> {
     @Transactional(rollbackFor = Exception.class)
     void editPictureByBatch(PictureEditByBatchRequest pictureEditByBatchRequest, User loginUser);
 
-    /**
-     * 异步生成图片智能标签并更新数据库
-     * @param pictureId 图片ID
-     * @param imageUrl 图片URL
-     */
-    @Async
-    void generateAndSaveTags(Long pictureId, String imageUrl);
 
     /**
      * 获取图片标签和分类（动态从数据库读取，热门标签 Top10）

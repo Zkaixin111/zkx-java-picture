@@ -19,6 +19,7 @@ import com.zkxpicturebackend.exception.BusinessException;
 import com.zkxpicturebackend.exception.ErrorCode;
 import com.zkxpicturebackend.exception.ThrowUtils;
 import com.zkxpicturebackend.manager.CosManager;
+import com.zkxpicturebackend.manager.rabbitmq.AiTagProducer;
 import com.zkxpicturebackend.manager.upload.FilePictureUpload;
 import com.zkxpicturebackend.manager.upload.PictureUploadTemplate;
 import com.zkxpicturebackend.manager.upload.UrlPictureUpload;
@@ -74,6 +75,8 @@ import java.util.stream.Collectors;
 public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         implements PictureService {
 
+    public static final String HOT_TAGS_REDIS_KEY = "picture:hotTags";
+
     // 批量抓取模式标记：设为 true 时 uploadPicture 跳过 AI 标签触发
     private static final ThreadLocal<Boolean> SKIP_AI_TAG = ThreadLocal.withInitial(() -> false);
 
@@ -93,6 +96,9 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
     private AliYunAiApi aliYunAiApi;
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private AiTagProducer aiTagProducer;
+
     // 自引用代理，用于 @Async / @Transactional 自调用时确保 AOP 生效
     @Lazy
     @Resource
@@ -282,11 +288,11 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
             }
             throw e;
         }
-        // 异步生成 AI 智能标签（通过注入的 proxy 调用，确保 @Async 生效）
-        // 批量抓取模式下跳过，由批量方法统一触发
-        if (!SKIP_AI_TAG.get()) {
-            pictureServiceProxy.generateAndSaveTags(picture.getId(), picture.getUrl());
-        }
+        // 单张上传不自动触发 AI 标签，由用户手动调用 /generate_tags 接口
+        // 批量抓取模式下由 uploadPictureByBatch 统一触发
+//        if (!SKIP_AI_TAG.get()) {
+//            aiTagProducer.sendAiTagMessage(picture.getId(), picture.getUrl());
+//        }
         return PictureVO.objToVo(picture);
     }
 
@@ -570,7 +576,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
     }
 
     @Override
-    public Integer uploadPictureByBatch(PictureUploadByBatchRequest pictureUploadByBatchRequest, User loginUser) {
+    public Integer uploadPictureByBatch(PictureUploadByBatchRequest pictureUploadByBatchRequest, User loginUser) throws InterruptedException {
         String searchText = pictureUploadByBatchRequest.getSearchText();
 
         // 格式化数量
@@ -597,7 +603,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         Elements imgElementList = div.select("img.mimg");
         int uploadCount = 0;
         // 收集上传成功的图片 ID 和 URL，用于后续批量 AI 标签生成
-        List<long[]> uploadedPictures = new ArrayList<>();
+        Map<Long, String> uploadedPictures = new LinkedHashMap<>();
         // 批量抓取模式：跳过单张上传时的 AI 触发
         SKIP_AI_TAG.set(true);
         try {
@@ -622,7 +628,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
                 try {
                     PictureVO pictureVO = this.uploadPicture(fileUrl, pictureUploadRequest, loginUser);
                     log.info("图片上传成功, id = {}", pictureVO.getId());
-                    uploadedPictures.add(new long[]{pictureVO.getId(), 0}); // id 占位
+                    uploadedPictures.put(pictureVO.getId(), pictureVO.getUrl());
                     uploadCount++;
                 } catch (Exception e) {
                     log.error("图片上传失败", e);
@@ -639,18 +645,10 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         // 批量上传完成后，统一异步触发 AI 标签生成（避免并发超限）
         if (CollUtil.isNotEmpty(uploadedPictures)) {
             log.info("批量上传完成，共 {} 张，开始逐张 AI 标签生成", uploadedPictures.size());
-            // 查询刚上传的图片 URL，逐张触发 AI（带延迟避免 QPS 超限）
-            for (long[] pic : uploadedPictures) {
-                try {
-                    Picture picture = this.getById(pic[0]);
-                    if (picture != null) {
-                        pictureServiceProxy.generateAndSaveTags(picture.getId(), picture.getUrl());
-                        // 每张间隔 500ms，避免 AI 接口并发超限
-                        Thread.sleep(500);
-                    }
-                } catch (Exception e) {
-                    log.error("批量 AI 标签触发失败，pictureId={}", pic[0], e);
-                }
+            // 直接使用上传时已获取的 URL，逐张触发 AI（带延迟避免 QPS 超限）
+            for (Map.Entry<Long, String> entry : uploadedPictures.entrySet()) {
+                aiTagProducer.sendAiTagMessage(entry.getKey(), entry.getValue());
+                Thread.sleep(500); // 保留间隔，防止瞬间发太多消息到队列
             }
         }
         return uploadCount;
@@ -884,51 +882,6 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
 
 
     /**
-     * 生成图片智能标签和分类并更新数据库
-     * 调用通义千问VL识别图片内容，将标签和分类写入数据库
-     */
-    @Override
-    @Async
-    public void generateAndSaveTags(Long pictureId, String imageUrl) {
-        try {
-            log.info("开始 AI 图像识别，pictureId={}, imageUrl={}", pictureId, imageUrl);
-            ImageRecognitionResult recognition = aliYunAiApi.recognizeImage(imageUrl);
-            log.info("AI 识别结果，pictureId={}, tags={}, category={}", pictureId, recognition.getTags(), recognition.getCategory());
-
-            Picture update = new Picture();
-            update.setId(pictureId);
-            boolean hasUpdate = false;
-
-            // 写入标签（最多 3 个）
-            if (CollUtil.isNotEmpty(recognition.getTags())) {
-                List<String> tags = recognition.getTags();
-                if (tags.size() > 3) {
-                    tags = tags.subList(0, 3);
-                }
-                update.setTags(JSONUtil.toJsonStr(tags));
-                hasUpdate = true;
-            }
-            // 写入分类
-            if (StrUtil.isNotBlank(recognition.getCategory())) {
-                update.setCategory(recognition.getCategory());
-                hasUpdate = true;
-            }
-
-            if (hasUpdate) {
-                boolean updated = this.updateById(update);
-                if (updated) {
-                    log.info("AI 标签/分类写入成功，pictureId={}", pictureId);
-                    stringRedisTemplate.delete("picture:hotTags");
-                }
-            } else {
-                log.warn("AI 识别结果为空，pictureId={}", pictureId);
-            }
-        } catch (Exception e) {
-            log.error("AI 图像识别失败，pictureId={}, imageUrl={}", pictureId, imageUrl, e);
-        }
-    }
-
-    /**
      * 获取图片标签和分类（动态从数据库读取，热门标签取 Top10）
      */
     @Override
@@ -936,7 +889,7 @@ public class PictureServiceImpl extends ServiceImpl<PictureMapper, Picture>
         PictureTagCategory result = new PictureTagCategory();
 
         // 热门标签：先查 Redis 缓存，缓存未命中则从数据库统计
-        String cacheKey = "picture:hotTags";
+        String cacheKey = HOT_TAGS_REDIS_KEY;
         String cachedTags = stringRedisTemplate.opsForValue().get(cacheKey);
         List<String> tagList;
         if (StrUtil.isNotBlank(cachedTags)) {
